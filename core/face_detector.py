@@ -6,9 +6,11 @@ import pickle
 import numpy as np
 import time
 import threading
+import config
 
 class OptimizedFaceDetector:
-    def __init__(self, encodings_path=r'D:\Bureau_Tutorials\Hikvision-Face-Recognition\model\encodings_fixed.pickle'):
+    def __init__(self, encodings_path=None):
+        encodings_path = encodings_path or config.ENCODINGS_PATH
         print("🔄 Loading face recognition model...")
         print(f"🔍 Trying to load encodings from: {encodings_path}")
         print(f"🔍 File exists: {os.path.exists(encodings_path)}")
@@ -53,45 +55,37 @@ class OptimizedFaceDetector:
         
         # If no encodings loaded, just detect faces without recognition
         if not self.known_face_encodings:
-            # Simple face detection using OpenCV (fallback)
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
             faces = face_cascade.detectMultiScale(gray, 1.1, 4)
             
-            face_names = []
+            results = []
             for (x, y, w, h) in faces:
                 cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 0, 255), 2)
                 cv2.putText(frame, "Unknown (No encodings)", (x, y-10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-                face_names.append("Unknown")
+                results.append({'name': 'Unknown', 'confidence': 0.0, 'box': (x, y, x+w, y+h)})
             
-            # Display debug info
-            cv2.putText(frame, f"Faces: {len(face_names)}", (10, 30), 
+            cv2.putText(frame, f"Faces: {len(results)}", (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.putText(frame, "NO ENCODINGS LOADED", (10, 60), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
-            return frame, face_names
+            return frame, results
         
         # If encodings are loaded, use face_recognition
         try:
-            # Resize frame for faster processing
             small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
             rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
-            # Find all faces
             face_locations = face_recognition.face_locations(rgb_small_frame, model="hog")
             face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
             
-            print(f"🔍 Found {len(face_locations)} faces in frame")
-            
-            face_names = []
-            
-            for i, (face_encoding, face_location) in enumerate(zip(face_encodings, face_locations)):
+            out = []
+            for (face_encoding, (top, right, bottom, left)) in zip(face_encodings, face_locations):
                 name = "Unknown"
                 confidence = 0.0
                 
-                # Compare faces
                 matches = face_recognition.compare_faces(
                     self.known_face_encodings, 
                     face_encoding, 
@@ -101,44 +95,24 @@ class OptimizedFaceDetector:
                 face_distances = face_recognition.face_distance(self.known_face_encodings, face_encoding)
                 
                 if len(face_distances) > 0:
-                    best_match_index = np.argmin(face_distances)
-                    best_distance = face_distances[best_match_index]
-                    confidence = 1 - best_distance
-                    
-                    print(f"🎯 Face {i+1}: Best match: {self.known_face_names[best_match_index]}")
-                    print(f"    Distance: {best_distance:.4f}, Confidence: {confidence:.4f}, Match: {matches[best_match_index]}")
-                    
-                    # Use a confidence threshold
+                    best_match_index = int(np.argmin(face_distances))
+                    best_distance = float(face_distances[best_match_index])
+                    confidence = max(0.0, 1.0 - best_distance)
                     if matches[best_match_index] and confidence > 0.5:
                         name = self.known_face_names[best_match_index]
-                        print(f"✅ RECOGNIZED: {name} (confidence: {confidence:.2f})")
-                    else:
-                        print(f"❌ No match - Distance too high: {best_distance:.4f}")
                 
-                face_names.append(name)
-            
-            # Draw results
-            for (top, right, bottom, left), name in zip(face_locations, face_names):
+                # scale back up to original frame size
                 top *= 2; right *= 2; bottom *= 2; left *= 2
-                
                 color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
                 cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
-                
                 cv2.rectangle(frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
                 cv2.putText(frame, name, (left + 6, bottom - 6), 
                            cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
+                out.append({'name': name, 'confidence': confidence, 'box': (left, top, right, bottom)})
             
-            # Display debug info
-            cv2.putText(frame, f"Faces: {len(face_names)}", (10, 30), 
+            cv2.putText(frame, f"Faces: {len(out)}", (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(frame, f"Known: {len(self.known_face_encodings)}", (10, 60), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            
-            if len(face_names) > 0 and face_names[0] != "Unknown":
-                cv2.putText(frame, f"RECOGNIZED: {face_names[0]}", (10, 90), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            
-            return frame, face_names
+            return frame, out
             
         except Exception as e:
             print(f"❌ Error in face recognition: {e}")

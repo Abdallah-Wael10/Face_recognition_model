@@ -15,6 +15,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.face_detector import OptimizedFaceDetector, CameraStream
 from core.database import DetectionDB
+from core.backend_client import BackendClient
+from core.gesture_detector import GestureDetector
 import config
 app = Flask(__name__)
 
@@ -22,23 +24,32 @@ app = Flask(__name__)
 camera_stream = None
 face_detector = None
 database = None
+backend_client = None
+gesture_detector = None
 current_detections = []
 system_initialized = False
 
+# Debounce and correlation state
+_last_clock_in = {}
+_last_clock_out = {}
+_pending_face = {}
+
 def initialize_system():
-    global camera_stream, face_detector, database, system_initialized
+    global camera_stream, face_detector, database, backend_client, gesture_detector, system_initialized
     
     print("🚀 Initializing face recognition system...")
     
     try:
         # Initialize components
         database = DetectionDB()
+        backend_client = BackendClient()
+        gesture_detector = GestureDetector()
         
         # Load your existing encodings
         face_detector = OptimizedFaceDetector()
         
         # Start camera stream - Use 0 for webcam or RTSP URL
-        camera_stream = CameraStream(rtsp_url=RTSP_URL)
+        camera_stream = CameraStream(rtsp_url=config.RTSP_URL)
         success = camera_stream.start()
         
         if not success:
@@ -53,55 +64,90 @@ def initialize_system():
         print(f"❌ System initialization failed: {e}")
         return False
 
+def _can_fire(name: str, last_map: dict, cooldown_sec: int) -> bool:
+    now = time.time()
+    return (name not in last_map) or (now - last_map[name] > cooldown_sec)
+
+def _mark_fired(name: str, last_map: dict):
+    last_map[name] = time.time()
+
 def generate_frames():
-    """Generate frames with face detection for streaming"""
-    last_detection_log = {}
-    frame_count = 0
-    
+    """Generate frames with face detection, gesture detection, and backend events"""
     while True:
         if not system_initialized or camera_stream is None:
             time.sleep(0.1)
             continue
-            
+        
         frame = camera_stream.get_frame()
-        if frame is not None:
-            try:
-                # Process frame with face detection
-                processed_frame, detected_names = face_detector.recognize_faces(frame)
-                
-                # Log new detections
-                current_time = time.time()
-                for name in detected_names:
-                    if name != "Unknown":
-                        # Log only once per minute per person
-                        if (name not in last_detection_log or 
-                            current_time - last_detection_log[name] > 60):
-                            database.log_detection(name, confidence=0.95)
-                            last_detection_log[name] = current_time
-                            print(f"👤 Detected: {name}")
-                
-                # Update current detections for API
-                global current_detections
-                current_detections = detected_names
-                
-                # Encode frame as JPEG
-                ret, buffer = cv2.imencode('.jpg', processed_frame, 
-                                         [cv2.IMWRITE_JPEG_QUALITY, 80])
-                frame_bytes = buffer.tobytes()
-                
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-                       
-            except Exception as e:
-                print(f"❌ Error processing frame: {e}")
-                # Return original frame on error
-                ret, buffer = cv2.imencode('.jpg', frame)
-                frame_bytes = buffer.tobytes()
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-        else:
-            # No frame available
+        if frame is None:
             time.sleep(0.1)
+            continue
+        
+        try:
+            # Face recognition
+            processed_frame, faces = face_detector.recognize_faces(frame)
+            # Gesture detection
+            gesture = gesture_detector.detect(processed_frame) if gesture_detector else {'is_open_palm': False}
+
+            # Update current detections for API
+            global current_detections
+            current_detections = [f['name'] for f in faces]
+
+            # Pick the first known face as primary
+            primary = next((f for f in faces if f['name'] != "Unknown"), None)
+            now = time.time()
+            if primary:
+                name = primary['name']
+                conf = float(primary.get('confidence', 0.0))
+
+                # Remember last seen time for correlation window
+                _pending_face[name] = now
+
+                # CLOCK IN (debounced)
+                if _can_fire(name, _last_clock_in, config.EVENTS['clock_in_cooldown_sec']):
+                    database.log_detection(name, confidence=conf)
+                    backend_client.send_event(
+                        employee_id=None,  # map face name to ID if needed
+                        event_type="CLOCK_IN",
+                        confidence=conf,
+                        context={
+                            'frameId': f"{int(now*1000)}-{name}",
+                            'gesture': None
+                        },
+                        image_bgr=None,
+                        face_name=name
+                    )
+                    _mark_fired(name, _last_clock_in)
+
+                # CLOCK OUT when open palm within gesture window (debounced)
+                if gesture.get('is_open_palm'):
+                    seen_at = _pending_face.get(name)
+                    if seen_at and (now - seen_at) <= config.EVENTS['gesture_window_sec']:
+                        if _can_fire(name, _last_clock_out, config.EVENTS['clock_out_cooldown_sec']):
+                            backend_client.send_event(
+                                employee_id=None,
+                                event_type="CLOCK_OUT",
+                                confidence=conf,
+                                context={
+                                    'frameId': f"{int(now*1000)}-{name}-out",
+                                    'gesture': 'OPEN_PALM'
+                                },
+                                image_bgr=None,
+                                face_name=name
+                            )
+                            _mark_fired(name, _last_clock_out)
+
+            # Encode frame and stream
+            ret, buffer = cv2.imencode('.jpg', processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        except Exception as e:
+            print(f"❌ Error processing frame: {e}")
+            ret, buffer = cv2.imencode('.jpg', frame)
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
 @app.route('/')
 def index():

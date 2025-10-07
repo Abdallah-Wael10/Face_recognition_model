@@ -63,3 +63,24 @@ PERFORMANCE_CONFIG = {
     'frame_timeout': 5,
     'gstreamer_enabled': True
 }
+
+
+# Backend Integration
+BACKEND = {
+    'base_url': 'http://localhost:5001',  # TODO
+    'token': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2OGMwMzMxZTMzMjQzM2JmMWQ0NDMwNGYiLCJlbWFpbCI6ImJlZG93YWVsMzY1QGdtYWlsLmNvbSIsInJvbGUiOiJhZG1pbiIsImZpcnN0TmFtZSI6ImJlZG8iLCJsYXN0TmFtZSI6IndhZWwiLCJ0eXBlIjoiYWNjZXNzIiwiaWF0IjoxNzU5ODMxNjg5LCJleHAiOjE3NjAwMDQ0ODl9.OjbdtzwcljHP-3W044zxafDnau-vtr7hZ78Ui3TpgZY',                             # TODO
+    'camera_id': 'Hikvision_001',
+    'timeout': 5,
+    'retries': 3
+}
+
+# Encodings path
+ENCODINGS_PATH = str(BASE_DIR / 'model' / 'encodings_fixed.pickle')
+
+# Attendance/event logic
+EVENTS = {
+    'clock_in_cooldown_sec': 60,
+    'clock_out_cooldown_sec': 60,
+    'gesture_window_sec': 3,
+    'attach_image': False  # set True to send frame snapshots
+}
