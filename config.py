@@ -84,3 +84,5 @@ EVENTS = {
     'gesture_window_sec': 3,
     'attach_image': False  # set True to send frame snapshots
 }
+
+
